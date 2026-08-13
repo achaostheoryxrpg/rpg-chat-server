@@ -1,744 +1,551 @@
 const express = require("express");
+const cors = require("cors");
 const http = require("http");
 const WebSocket = require("ws");
-const cors = require("cors");
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
+const PORT = process.env.PORT || 3000;
+
+
+// ======================================================
+// SERVIDOR HTTP
+// ======================================================
+
 const server = http.createServer(app);
+
+
+// ======================================================
+// WEBSOCKET
+// ======================================================
 
 const wss = new WebSocket.Server({
     server
 });
 
-const PORT = process.env.PORT || 3000;
 
+// ======================================================
+// USUÁRIOS CONECTADOS
+// ======================================================
+//
+// Cada conexão possui:
+//
+// {
+//     socket,
+//     username,
+//     location
+// }
+//
+// "location" é o local do RPG.
+//
+// Exemplos:
+//
+// calcdeirao-furado
+// beco-diagonal
+// hogwarts
+//
+// ======================================================
 
-// =====================================================
-// DADOS EM MEMÓRIA
-// =====================================================
-
-// socket -> usuário
 const users = new Map();
 
-// nome da sala -> Set de sockets
-const rooms = new Map();
 
+// ======================================================
+// LIMPAR TEXTO
+// ======================================================
 
-// Salas iniciais
-rooms.set("principal", new Set());
-rooms.set("taverna", new Set());
-rooms.set("arena", new Set());
+function limparTexto(texto, limite = 500) {
 
-
-// =====================================================
-// ROTA HTTP
-// =====================================================
-
-app.get("/", (req, res) => {
-
-    res.json({
-        status: "online",
-        service: "RPG Chat Server",
-        version: "2.0"
-    });
-
-});
-
-
-// =====================================================
-// WEBSOCKET
-// =====================================================
-
-wss.on("connection", (socket) => {
-
-    console.log("Novo usuário conectado.");
-
-    socket.user = null;
-    socket.room = null;
-
-
-    // =================================================
-    // RECEBER MENSAGEM
-    // =================================================
-
-    socket.on("message", (data) => {
-
-        try {
-
-            const message =
-                JSON.parse(data.toString());
-
-
-            console.log(
-                "Mensagem recebida:",
-                message
-            );
-
-
-            // =========================================
-            // ENTRAR NA SALA
-            // =========================================
-
-            if (message.type === "join") {
-
-                entrarNaSala(
-                    socket,
-                    message.username,
-                    message.room
-                );
-
-                return;
-            }
-
-
-            // =========================================
-            // SAIR DA SALA
-            // =========================================
-
-            if (message.type === "leave") {
-
-                sairDaSala(socket);
-
-                return;
-            }
-
-
-            // =========================================
-            // MENSAGEM NORMAL
-            // =========================================
-
-            if (message.type === "message") {
-
-                enviarMensagem(
-                    socket,
-                    message.text
-                );
-
-                return;
-            }
-
-
-            // =========================================
-            // /ME
-            // =========================================
-
-            if (message.type === "me") {
-
-                enviarAcao(
-                    socket,
-                    message.text
-                );
-
-                return;
-            }
-
-
-            // =========================================
-            // /ROLL
-            // =========================================
-
-            if (message.type === "roll") {
-
-                rolarDados(
-                    socket,
-                    message.sides
-                );
-
-                return;
-            }
-
-
-        } catch (error) {
-
-            console.error(
-                "Erro ao processar mensagem:",
-                error
-            );
-
-        }
-
-    });
-
-
-    // =================================================
-    // DESCONECTOU
-    // =================================================
-
-    socket.on("close", () => {
-
-        if (socket.user) {
-
-            const usuario =
-                socket.user.username;
-
-            const sala =
-                socket.user.room;
-
-
-            sairDaSala(socket);
-
-
-            console.log(
-                `${usuario} desconectou da sala ${sala}.`
-            );
-
-        } else {
-
-            console.log(
-                "Usuário desconectou."
-            );
-
-        }
-
-    });
-
-});
-
-
-// =====================================================
-// ENTRAR NA SALA
-// =====================================================
-
-function entrarNaSala(
-    socket,
-    username,
-    roomName
-) {
-
-    username =
-        limparTexto(
-            username,
-            30
-        ) || "Visitante";
-
-
-    roomName =
-        limparTexto(
-            roomName,
-            30
-        ) || "principal";
-
-
-    // -----------------------------------------------
-    // Se já estava em uma sala
-    // -----------------------------------------------
-
-    if (socket.user) {
-
-        sairDaSala(socket);
-
+    if (typeof texto !== "string") {
+        return "";
     }
 
+    return texto
+        .trim()
+        .slice(0, limite);
+}
 
-    // -----------------------------------------------
-    // Criar sala se não existir
-    // -----------------------------------------------
 
-    if (!rooms.has(roomName)) {
+// ======================================================
+// ENVIAR PARA UMA PESSOA
+// ======================================================
 
-        rooms.set(
-            roomName,
-            new Set()
+function enviar(socket, dados) {
+
+    if (socket.readyState === WebSocket.OPEN) {
+
+        socket.send(
+            JSON.stringify(dados)
         );
 
     }
-
-
-    // -----------------------------------------------
-    // Registrar usuário
-    // -----------------------------------------------
-
-    socket.user = {
-
-        username: username,
-
-        room: roomName,
-
-        joinedAt: Date.now()
-
-    };
-
-
-    socket.room =
-        roomName;
-
-
-    users.set(
-        socket,
-        socket.user
-    );
-
-
-    rooms
-        .get(roomName)
-        .add(socket);
-
-
-    // -----------------------------------------------
-    // Confirmar entrada
-    // -----------------------------------------------
-
-    send(socket, {
-
-        type: "system",
-
-        message:
-            `Você entrou na sala ${roomName}.`
-
-    });
-
-
-    // -----------------------------------------------
-    // Avisar os outros usuários
-    // -----------------------------------------------
-
-    broadcastRoomExcept(
-        roomName,
-        socket,
-        {
-
-            type: "system",
-
-            message:
-                `${username} entrou na sala.`
-
-        }
-    );
-
-
-    // -----------------------------------------------
-    // Atualizar lista
-    // -----------------------------------------------
-
-    sendUserList(roomName);
 
 }
 
 
-// =====================================================
-// SAIR DA SALA
-// =====================================================
+// ======================================================
+// ENVIAR PARA TODOS DO MESMO LOCAL
+// ======================================================
 
-function sairDaSala(socket) {
+function enviarLocal(location, dados) {
 
-    if (!socket.user) {
+    users.forEach(function(usuario) {
 
-        return;
-
-    }
-
-
-    const username =
-        socket.user.username;
-
-    const roomName =
-        socket.user.room;
-
-
-    const room =
-        rooms.get(roomName);
-
-
-    if (room) {
-
-        room.delete(socket);
-
-
-        broadcastRoom(
-            roomName,
-            {
-
-                type: "system",
-
-                message:
-                    `${username} saiu da sala.`
-
-            }
-        );
-
-
-        sendUserList(roomName);
-
-
-        // Remove salas vazias
         if (
-            room.size === 0 &&
-            !["principal", "taverna", "arena"]
-                .includes(roomName)
+            usuario.location === location &&
+            usuario.socket.readyState === WebSocket.OPEN
         ) {
 
-            rooms.delete(roomName);
+            usuario.socket.send(
+                JSON.stringify(dados)
+            );
 
         }
 
-    }
-
-
-    users.delete(socket);
-
-    socket.user = null;
-
-    socket.room = null;
+    });
 
 }
 
 
-// =====================================================
-// MENSAGEM NORMAL
-// =====================================================
-
-function enviarMensagem(
-    socket,
-    text
-) {
-
-    if (!socket.user) {
-
-        return;
-
-    }
-
-
-    text =
-        limparTexto(
-            text,
-            1000
-        );
-
-
-    if (!text) {
-
-        return;
-
-    }
-
-
-    broadcastRoom(
-        socket.user.room,
-        {
-
-            type: "message",
-
-            username:
-                socket.user.username,
-
-            text: text,
-
-            timestamp:
-                Date.now()
-
-        }
-    );
-
-}
-
-
-// =====================================================
-// /ME
-// =====================================================
-
-function enviarAcao(
-    socket,
-    text
-) {
-
-    if (!socket.user) {
-
-        return;
-
-    }
-
-
-    text =
-        limparTexto(
-            text,
-            1000
-        );
-
-
-    if (!text) {
-
-        return;
-
-    }
-
-
-    broadcastRoom(
-        socket.user.room,
-        {
-
-            type: "me",
-
-            username:
-                socket.user.username,
-
-            text: text,
-
-            timestamp:
-                Date.now()
-
-        }
-    );
-
-}
-
-
-// =====================================================
-// /ROLL
-// =====================================================
-
-function rolarDados(
-    socket,
-    sides
-) {
-
-    if (!socket.user) {
-
-        return;
-
-    }
-
-
-    sides =
-        Number(sides);
-
-
-    // Limite de segurança
-    if (
-        !Number.isInteger(sides) ||
-        sides < 2 ||
-        sides > 1000
-    ) {
-
-        send(socket, {
-
-            type: "system",
-
-            message:
-                "Use /roll seguido de um número entre 2 e 1000."
-
-        });
-
-        return;
-
-    }
-
-
-    const resultado =
-        Math.floor(
-            Math.random() * sides
-        ) + 1;
-
-
-    broadcastRoom(
-        socket.user.room,
-        {
-
-            type: "roll",
-
-            username:
-                socket.user.username,
-
-            sides:
-                sides,
-
-            result:
-                resultado,
-
-            timestamp:
-                Date.now()
-
-        }
-    );
-
-}
-
-
-// =====================================================
-// LISTA DE USUÁRIOS
-// =====================================================
-
-function sendUserList(
-    roomName
-) {
-
-    const room =
-        rooms.get(roomName);
-
-
-    if (!room) {
-
-        return;
-
-    }
-
+// ======================================================
+// LISTA DE USUÁRIOS DO LOCAL
+// ======================================================
+
+function enviarListaUsuarios(location) {
 
     const usuarios = [];
 
-
-    for (
-        const socket of room
-    ) {
+    users.forEach(function(usuario) {
 
         if (
-            socket.user
+            usuario.location === location &&
+            usuario.username
         ) {
 
-            usuarios.push({
+            usuarios.push(
+                usuario.username
+            );
 
-                username:
-                    socket.user.username
+        }
+
+    });
+
+
+    enviarLocal(location, {
+
+        type: "users",
+
+        users: usuarios
+
+    });
+
+}
+
+
+// ======================================================
+// CONEXÃO
+// ======================================================
+
+wss.on("connection", function(socket) {
+
+    console.log("Nova conexão WebSocket.");
+
+
+    // --------------------------------------------------
+    // MENSAGEM RECEBIDA
+    // --------------------------------------------------
+
+    socket.on("message", function(data) {
+
+        try {
+
+            const mensagem =
+                JSON.parse(data.toString());
+
+
+            // ==========================================
+            // ENTRAR NO LOCAL
+            // ==========================================
+
+            if (mensagem.type === "join") {
+
+                const username =
+                    limparTexto(
+                        mensagem.username,
+                        30
+                    );
+
+                const location =
+                    limparTexto(
+                        mensagem.location,
+                        50
+                    );
+
+
+                if (!username || !location) {
+
+                    enviar(socket, {
+
+                        type: "error",
+
+                        message:
+                            "Usuário ou local inválido."
+
+                    });
+
+                    return;
+
+                }
+
+
+                // --------------------------------------
+                // SALVAR USUÁRIO
+                // --------------------------------------
+
+                users.set(socket, {
+
+                    socket: socket,
+
+                    username: username,
+
+                    location: location
+
+                });
+
+
+                console.log(
+                    `${username} entrou em ${location}`
+                );
+
+
+                // --------------------------------------
+                // AVISAR O LOCAL
+                // --------------------------------------
+
+                enviarLocal(location, {
+
+                    type: "system",
+
+                    message:
+                        `${username} entrou no local.`
+
+                });
+
+
+                // --------------------------------------
+                // ATUALIZAR LISTA
+                // --------------------------------------
+
+                enviarListaUsuarios(location);
+
+
+                return;
+
+            }
+
+
+            // ==========================================
+            // MENSAGEM NORMAL
+            // ==========================================
+
+            if (mensagem.type === "message") {
+
+                const usuario =
+                    users.get(socket);
+
+
+                if (!usuario) {
+
+                    enviar(socket, {
+
+                        type: "error",
+
+                        message:
+                            "Você ainda não entrou em um local."
+
+                    });
+
+                    return;
+
+                }
+
+
+                const texto =
+                    limparTexto(
+                        mensagem.text,
+                        1000
+                    );
+
+
+                if (!texto) {
+                    return;
+                }
+
+
+                console.log(
+                    `${usuario.location} | ${usuario.username}: ${texto}`
+                );
+
+
+                enviarLocal(
+                    usuario.location,
+                    {
+
+                        type: "message",
+
+                        username:
+                            usuario.username,
+
+                        text:
+                            texto,
+
+                        timestamp:
+                            Date.now()
+
+                    }
+                );
+
+
+                return;
+
+            }
+
+
+            // ==========================================
+            // /ME
+            // ==========================================
+
+            if (mensagem.type === "me") {
+
+                const usuario =
+                    users.get(socket);
+
+
+                if (!usuario) {
+                    return;
+                }
+
+
+                const texto =
+                    limparTexto(
+                        mensagem.text,
+                        500
+                    );
+
+
+                if (!texto) {
+                    return;
+                }
+
+
+                enviarLocal(
+                    usuario.location,
+                    {
+
+                        type: "action",
+
+                        username:
+                            usuario.username,
+
+                        text:
+                            texto,
+
+                        timestamp:
+                            Date.now()
+
+                    }
+                );
+
+
+                return;
+
+            }
+
+
+            // ==========================================
+            // /ROLL
+            // ==========================================
+
+            if (mensagem.type === "roll") {
+
+                const usuario =
+                    users.get(socket);
+
+
+                if (!usuario) {
+                    return;
+                }
+
+
+                const resultado =
+                    Math.floor(
+                        Math.random() * 20
+                    ) + 1;
+
+
+                enviarLocal(
+                    usuario.location,
+                    {
+
+                        type: "roll",
+
+                        username:
+                            usuario.username,
+
+                        result:
+                            resultado,
+
+                        timestamp:
+                            Date.now()
+
+                    }
+                );
+
+
+                return;
+
+            }
+
+
+            // ==========================================
+            // SAIR DO LOCAL
+            // ==========================================
+
+            if (mensagem.type === "leave") {
+
+                removerUsuario(socket);
+
+                return;
+
+            }
+
+        } catch (erro) {
+
+            console.error(
+                "Erro ao processar mensagem:",
+                erro
+            );
+
+
+            enviar(socket, {
+
+                type: "error",
+
+                message:
+                    "Mensagem inválida."
 
             });
 
         }
 
+    });
+
+
+    // --------------------------------------------------
+    // DESCONECTAR
+    // --------------------------------------------------
+
+    socket.on("close", function() {
+
+        removerUsuario(socket);
+
+    });
+
+
+    // --------------------------------------------------
+    // ERRO
+    // --------------------------------------------------
+
+    socket.on("error", function(erro) {
+
+        console.error(
+            "Erro WebSocket:",
+            erro
+        );
+
+    });
+
+});
+
+
+// ======================================================
+// REMOVER USUÁRIO
+// ======================================================
+
+function removerUsuario(socket) {
+
+    const usuario =
+        users.get(socket);
+
+
+    if (!usuario) {
+        return;
     }
 
 
-    broadcastRoom(
-        roomName,
+    console.log(
+        `${usuario.username} saiu de ${usuario.location}`
+    );
+
+
+    // ----------------------------------------------
+    // AVISAR O LOCAL
+    // ----------------------------------------------
+
+    enviarLocal(
+        usuario.location,
         {
 
-            type: "users",
+            type: "system",
 
-            users:
-                usuarios
+            message:
+                `${usuario.username} saiu do local.`
 
         }
+    );
+
+
+    // ----------------------------------------------
+    // REMOVER
+    // ----------------------------------------------
+
+    users.delete(socket);
+
+
+    // ----------------------------------------------
+    // ATUALIZAR LISTA
+    // ----------------------------------------------
+
+    enviarListaUsuarios(
+        usuario.location
     );
 
 }
 
 
-// =====================================================
-// ENVIAR PARA UM SOCKET
-// =====================================================
+// ======================================================
+// ROTA PRINCIPAL
+// ======================================================
 
-function send(
-    socket,
-    data
-) {
+app.get("/", function(req, res) {
 
-    if (
-        socket.readyState ===
-        WebSocket.OPEN
-    ) {
+    res.send(
+        "Servidor do chat RPG funcionando."
+    );
 
-        socket.send(
-            JSON.stringify(data)
-        );
-
-    }
-
-}
+});
 
 
-// =====================================================
-// ENVIAR PARA SALA
-// =====================================================
-
-function broadcastRoom(
-    roomName,
-    data
-) {
-
-    const room =
-        rooms.get(roomName);
-
-
-    if (!room) {
-
-        return;
-
-    }
-
-
-    for (
-        const socket of room
-    ) {
-
-        send(
-            socket,
-            data
-        );
-
-    }
-
-}
-
-
-// =====================================================
-// ENVIAR PARA SALA, EXCETO UM SOCKET
-// =====================================================
-
-function broadcastRoomExcept(
-    roomName,
-    excludedSocket,
-    data
-) {
-
-    const room =
-        rooms.get(roomName);
-
-
-    if (!room) {
-
-        return;
-
-    }
-
-
-    for (
-        const socket of room
-    ) {
-
-        if (
-            socket !==
-            excludedSocket
-        ) {
-
-            send(
-                socket,
-                data
-            );
-
-        }
-
-    }
-
-}
-
-
-// =====================================================
-// LIMPAR TEXTO
-// =====================================================
-
-function limparTexto(
-    texto,
-    limite
-) {
-
-    return String(
-        texto || ""
-    )
-        .trim()
-        .slice(0, limite);
-
-}
-
-
-// =====================================================
+// ======================================================
 // INICIAR SERVIDOR
-// =====================================================
+// ======================================================
 
 server.listen(
     PORT,
-    () => {
+    "0.0.0.0",
+    function() {
 
         console.log(
             `Servidor rodando na porta ${PORT}`
