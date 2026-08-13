@@ -16,30 +16,42 @@ const wss = new WebSocket.Server({
 
 const PORT = process.env.PORT || 3000;
 
-// Usuários conectados
+
+// =====================================================
+// DADOS EM MEMÓRIA
+// =====================================================
+
+// socket -> usuário
 const users = new Map();
 
-// Salas
+// nome da sala -> Set de sockets
 const rooms = new Map();
 
+
+// Salas iniciais
 rooms.set("principal", new Set());
+rooms.set("taverna", new Set());
+rooms.set("arena", new Set());
 
 
-// ==============================
-// ROTA DE TESTE
-// ==============================
+// =====================================================
+// ROTA HTTP
+// =====================================================
 
 app.get("/", (req, res) => {
+
     res.json({
         status: "online",
-        service: "RPG Chat Server"
+        service: "RPG Chat Server",
+        version: "2.0"
     });
+
 });
 
 
-// ==============================
+// =====================================================
 // WEBSOCKET
-// ==============================
+// =====================================================
 
 wss.on("connection", (socket) => {
 
@@ -49,89 +61,96 @@ wss.on("connection", (socket) => {
     socket.room = null;
 
 
+    // =================================================
+    // RECEBER MENSAGEM
+    // =================================================
+
     socket.on("message", (data) => {
 
         try {
 
-            const message = JSON.parse(data.toString());
+            const message =
+                JSON.parse(data.toString());
 
-            console.log("Mensagem recebida:", message);
+
+            console.log(
+                "Mensagem recebida:",
+                message
+            );
 
 
-            // --------------------------
+            // =========================================
             // ENTRAR NA SALA
-            // --------------------------
+            // =========================================
 
             if (message.type === "join") {
 
-                const username = String(message.username || "Visitante");
-                const roomName = String(message.room || "principal");
-
-                socket.user = username;
-                socket.room = roomName;
-
-                users.set(socket, {
-                    username,
-                    room: roomName
-                });
-
-
-                if (!rooms.has(roomName)) {
-                    rooms.set(roomName, new Set());
-                }
-
-                rooms.get(roomName).add(socket);
-
-
-                send(socket, {
-                    type: "system",
-                    message: `Você entrou na sala ${roomName}.`
-                });
-
-
-                broadcastRoom(roomName, {
-                    type: "system",
-                    message: `${username} entrou na sala.`
-                });
-
-
-                sendUserList(roomName);
+                entrarNaSala(
+                    socket,
+                    message.username,
+                    message.room
+                );
 
                 return;
             }
 
 
-            // --------------------------
-            // MENSAGEM
-            // --------------------------
+            // =========================================
+            // SAIR DA SALA
+            // =========================================
+
+            if (message.type === "leave") {
+
+                sairDaSala(socket);
+
+                return;
+            }
+
+
+            // =========================================
+            // MENSAGEM NORMAL
+            // =========================================
 
             if (message.type === "message") {
 
-                if (!socket.user || !socket.room) {
-                    return;
-                }
-
-                const text = String(message.text || "").trim();
-
-                if (!text) {
-                    return;
-                }
-
-
-                broadcastRoom(socket.room, {
-
-                    type: "message",
-
-                    username: socket.user,
-
-                    text: text,
-
-                    timestamp: Date.now()
-
-                });
+                enviarMensagem(
+                    socket,
+                    message.text
+                );
 
                 return;
             }
+
+
+            // =========================================
+            // /ME
+            // =========================================
+
+            if (message.type === "me") {
+
+                enviarAcao(
+                    socket,
+                    message.text
+                );
+
+                return;
+            }
+
+
+            // =========================================
+            // /ROLL
+            // =========================================
+
+            if (message.type === "roll") {
+
+                rolarDados(
+                    socket,
+                    message.sides
+                );
+
+                return;
+            }
+
 
         } catch (error) {
 
@@ -145,51 +164,470 @@ wss.on("connection", (socket) => {
     });
 
 
-    // --------------------------
+    // =================================================
     // DESCONECTOU
-    // --------------------------
+    // =================================================
 
     socket.on("close", () => {
 
-        const user = users.get(socket);
+        if (socket.user) {
 
-        if (!user) {
-            return;
+            const usuario =
+                socket.user.username;
+
+            const sala =
+                socket.user.room;
+
+
+            sairDaSala(socket);
+
+
+            console.log(
+                `${usuario} desconectou da sala ${sala}.`
+            );
+
+        } else {
+
+            console.log(
+                "Usuário desconectou."
+            );
+
         }
-
-        const room = rooms.get(user.room);
-
-        if (room) {
-            room.delete(socket);
-        }
-
-        users.delete(socket);
-
-
-        broadcastRoom(user.room, {
-            type: "system",
-            message: `${user.username} saiu da sala.`
-        });
-
-
-        sendUserList(user.room);
-
-        console.log(
-            `${user.username} desconectou.`
-        );
 
     });
 
 });
 
 
-// ==============================
-// FUNÇÕES
-// ==============================
+// =====================================================
+// ENTRAR NA SALA
+// =====================================================
 
-function send(socket, data) {
+function entrarNaSala(
+    socket,
+    username,
+    roomName
+) {
 
-    if (socket.readyState === WebSocket.OPEN) {
+    username =
+        limparTexto(
+            username,
+            30
+        ) || "Visitante";
+
+
+    roomName =
+        limparTexto(
+            roomName,
+            30
+        ) || "principal";
+
+
+    // -----------------------------------------------
+    // Se já estava em uma sala
+    // -----------------------------------------------
+
+    if (socket.user) {
+
+        sairDaSala(socket);
+
+    }
+
+
+    // -----------------------------------------------
+    // Criar sala se não existir
+    // -----------------------------------------------
+
+    if (!rooms.has(roomName)) {
+
+        rooms.set(
+            roomName,
+            new Set()
+        );
+
+    }
+
+
+    // -----------------------------------------------
+    // Registrar usuário
+    // -----------------------------------------------
+
+    socket.user = {
+
+        username: username,
+
+        room: roomName,
+
+        joinedAt: Date.now()
+
+    };
+
+
+    socket.room =
+        roomName;
+
+
+    users.set(
+        socket,
+        socket.user
+    );
+
+
+    rooms
+        .get(roomName)
+        .add(socket);
+
+
+    // -----------------------------------------------
+    // Confirmar entrada
+    // -----------------------------------------------
+
+    send(socket, {
+
+        type: "system",
+
+        message:
+            `Você entrou na sala ${roomName}.`
+
+    });
+
+
+    // -----------------------------------------------
+    // Avisar os outros usuários
+    // -----------------------------------------------
+
+    broadcastRoomExcept(
+        roomName,
+        socket,
+        {
+
+            type: "system",
+
+            message:
+                `${username} entrou na sala.`
+
+        }
+    );
+
+
+    // -----------------------------------------------
+    // Atualizar lista
+    // -----------------------------------------------
+
+    sendUserList(roomName);
+
+}
+
+
+// =====================================================
+// SAIR DA SALA
+// =====================================================
+
+function sairDaSala(socket) {
+
+    if (!socket.user) {
+
+        return;
+
+    }
+
+
+    const username =
+        socket.user.username;
+
+    const roomName =
+        socket.user.room;
+
+
+    const room =
+        rooms.get(roomName);
+
+
+    if (room) {
+
+        room.delete(socket);
+
+
+        broadcastRoom(
+            roomName,
+            {
+
+                type: "system",
+
+                message:
+                    `${username} saiu da sala.`
+
+            }
+        );
+
+
+        sendUserList(roomName);
+
+
+        // Remove salas vazias
+        if (
+            room.size === 0 &&
+            !["principal", "taverna", "arena"]
+                .includes(roomName)
+        ) {
+
+            rooms.delete(roomName);
+
+        }
+
+    }
+
+
+    users.delete(socket);
+
+    socket.user = null;
+
+    socket.room = null;
+
+}
+
+
+// =====================================================
+// MENSAGEM NORMAL
+// =====================================================
+
+function enviarMensagem(
+    socket,
+    text
+) {
+
+    if (!socket.user) {
+
+        return;
+
+    }
+
+
+    text =
+        limparTexto(
+            text,
+            1000
+        );
+
+
+    if (!text) {
+
+        return;
+
+    }
+
+
+    broadcastRoom(
+        socket.user.room,
+        {
+
+            type: "message",
+
+            username:
+                socket.user.username,
+
+            text: text,
+
+            timestamp:
+                Date.now()
+
+        }
+    );
+
+}
+
+
+// =====================================================
+// /ME
+// =====================================================
+
+function enviarAcao(
+    socket,
+    text
+) {
+
+    if (!socket.user) {
+
+        return;
+
+    }
+
+
+    text =
+        limparTexto(
+            text,
+            1000
+        );
+
+
+    if (!text) {
+
+        return;
+
+    }
+
+
+    broadcastRoom(
+        socket.user.room,
+        {
+
+            type: "me",
+
+            username:
+                socket.user.username,
+
+            text: text,
+
+            timestamp:
+                Date.now()
+
+        }
+    );
+
+}
+
+
+// =====================================================
+// /ROLL
+// =====================================================
+
+function rolarDados(
+    socket,
+    sides
+) {
+
+    if (!socket.user) {
+
+        return;
+
+    }
+
+
+    sides =
+        Number(sides);
+
+
+    // Limite de segurança
+    if (
+        !Number.isInteger(sides) ||
+        sides < 2 ||
+        sides > 1000
+    ) {
+
+        send(socket, {
+
+            type: "system",
+
+            message:
+                "Use /roll seguido de um número entre 2 e 1000."
+
+        });
+
+        return;
+
+    }
+
+
+    const resultado =
+        Math.floor(
+            Math.random() * sides
+        ) + 1;
+
+
+    broadcastRoom(
+        socket.user.room,
+        {
+
+            type: "roll",
+
+            username:
+                socket.user.username,
+
+            sides:
+                sides,
+
+            result:
+                resultado,
+
+            timestamp:
+                Date.now()
+
+        }
+    );
+
+}
+
+
+// =====================================================
+// LISTA DE USUÁRIOS
+// =====================================================
+
+function sendUserList(
+    roomName
+) {
+
+    const room =
+        rooms.get(roomName);
+
+
+    if (!room) {
+
+        return;
+
+    }
+
+
+    const usuarios = [];
+
+
+    for (
+        const socket of room
+    ) {
+
+        if (
+            socket.user
+        ) {
+
+            usuarios.push({
+
+                username:
+                    socket.user.username
+
+            });
+
+        }
+
+    }
+
+
+    broadcastRoom(
+        roomName,
+        {
+
+            type: "users",
+
+            users:
+                usuarios
+
+        }
+    );
+
+}
+
+
+// =====================================================
+// ENVIAR PARA UM SOCKET
+// =====================================================
+
+function send(
+    socket,
+    data
+) {
+
+    if (
+        socket.readyState ===
+        WebSocket.OPEN
+    ) {
 
         socket.send(
             JSON.stringify(data)
@@ -200,65 +638,111 @@ function send(socket, data) {
 }
 
 
-function broadcastRoom(roomName, data) {
+// =====================================================
+// ENVIAR PARA SALA
+// =====================================================
 
-    const room = rooms.get(roomName);
+function broadcastRoom(
+    roomName,
+    data
+) {
+
+    const room =
+        rooms.get(roomName);
+
 
     if (!room) {
+
         return;
+
     }
 
 
-    for (const socket of room) {
+    for (
+        const socket of room
+    ) {
 
-        send(socket, data);
+        send(
+            socket,
+            data
+        );
 
     }
 
 }
 
 
-function sendUserList(roomName) {
+// =====================================================
+// ENVIAR PARA SALA, EXCETO UM SOCKET
+// =====================================================
 
-    const room = rooms.get(roomName);
+function broadcastRoomExcept(
+    roomName,
+    excludedSocket,
+    data
+) {
+
+    const room =
+        rooms.get(roomName);
+
 
     if (!room) {
+
         return;
+
     }
 
 
-    const usernames = [];
+    for (
+        const socket of room
+    ) {
 
-    for (const socket of room) {
+        if (
+            socket !==
+            excludedSocket
+        ) {
 
-        const user = users.get(socket);
+            send(
+                socket,
+                data
+            );
 
-        if (user) {
-            usernames.push(user.username);
         }
 
     }
 
+}
 
-    broadcastRoom(roomName, {
 
-        type: "users",
+// =====================================================
+// LIMPAR TEXTO
+// =====================================================
 
-        users: usernames
+function limparTexto(
+    texto,
+    limite
+) {
 
-    });
+    return String(
+        texto || ""
+    )
+        .trim()
+        .slice(0, limite);
 
 }
 
 
-// ==============================
+// =====================================================
 // INICIAR SERVIDOR
-// ==============================
+// =====================================================
 
-server.listen(PORT, () => {
+server.listen(
+    PORT,
+    () => {
 
-    console.log(
-        `Servidor rodando na porta ${PORT}`
-    );
+        console.log(
+            `Servidor rodando na porta ${PORT}`
+        );
 
-});
+    }
+);
